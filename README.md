@@ -97,35 +97,6 @@ A Lambda executa, resumidamente:
 7. Gera o JWT.
 8. Retorna o token para o cliente.
 
-Consulta utilizada:
-
-```sql
-SELECT id,
-       documento,
-       nome,
-       ativo
-FROM cliente
-WHERE documento = ?
-  AND tipo_pessoa = 'F';
-```
-
-A tabela utilizada pela autenticação possui a seguinte estrutura:
-
-```sql
-CREATE TABLE cliente (
-     id BIGSERIAL PRIMARY KEY,
-     tipo_pessoa VARCHAR(1) NOT NULL,
-     documento VARCHAR(14) NOT NULL UNIQUE,
-     inscricao_estadual VARCHAR(20),
-     nome VARCHAR(255) NOT NULL,
-     nome_fantasia VARCHAR(255),
-     email VARCHAR(255),
-     telefone VARCHAR(20),
-     ativo BOOLEAN NOT NULL DEFAULT TRUE,
-     data_criacao TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-```
-
 ## JWT do cliente
 
 O token utiliza assinatura `HMAC256`.
