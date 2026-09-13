@@ -2,83 +2,104 @@
 
 Function Serverless responsável pelo fluxo de autenticação dos **clientes da Oficina Dinoco**.
 
-Este repositório faz parte da Fase 3 do projeto de pós-graduação em Arquitetura de Software e complementa a aplicação principal `oficina-dinoco`, que continua responsável pelas regras de negócio e pelas rotas administrativas utilizadas por funcionários.
+Este repositório faz parte da Fase 3 do projeto e complementa a aplicação principal `oficina-dinoco`, mantendo isolado o fluxo serverless de autenticação por CPF.
 
-## Requisitos atendidos
+---
 
-A implementação foi criada para atender aos requisitos de autenticação e arquitetura serverless da fase:
+## 🎯 Objetivo do repositório
 
-- Implementar autenticação do cliente utilizando **CPF**.
-- Validar matematicamente o CPF informado.
-- Consultar a existência do cliente na base de dados.
-- Verificar o status do cliente (`ativo` / `inativo`).
-- Gerar e devolver um **JWT válido** para consumo das APIs protegidas.
-- Executar esse fluxo por meio de uma **Function Serverless AWS Lambda**.
-- Integrar o fluxo com o **AWS API Gateway**.
+Este repositório é responsável por:
 
-Os funcionários da oficina continuam utilizando o fluxo já existente na aplicação principal:
+- receber CPF através do API Gateway;
+- validar matematicamente o CPF;
+- consultar o cliente no PostgreSQL;
+- verificar se o cliente existe e está ativo;
+- obter segredos no AWS Secrets Manager;
+- emitir JWT do tipo `CLIENTE`;
+- executar o fluxo em AWS Lambda;
+- provisionar a infraestrutura específica da função com Terraform.
 
-```text
-Funcionário
-   ↓
-e-mail + senha
-   ↓
-Spring Boot
-   ↓
-JWT de funcionário
-```
+> O API Gateway é provisionado no repositório `oficina-infra-k8s`. O PostgreSQL/RDS é provisionado no `oficina-infra-db`.
 
-Já os clientes utilizam:
+---
+
+## 🏗️ Arquitetura específica deste repositório
+
+![Arquitetura da Auth Lambda](docs/architecture/oficina-auth-lambda-architecture.drawio.png)
+
+Fluxo principal:
 
 ```text
 Cliente
-   ↓
-CPF
-   ↓
+  |
+  | CPF
+  v
 API Gateway
-   ↓
+  |
+  | POST /auth/cliente
+  v
 AWS Lambda
-   ↓
-validação do CPF
-   ↓
-consulta PostgreSQL
-   ↓
-validação do cliente
-   ↓
-JWT de cliente
+  |
+  +--> Validação do CPF
+  |
+  +--> Secrets Manager
+  |      - credenciais do banco
+  |      - segredo JWT
+  |
+  +--> PostgreSQL RDS
+  |      - consulta cliente
+  |
+  +--> Geração do JWT
+          |
+          v
+       Cliente
 ```
 
-## Arquitetura
+A Lambda é associada à VPC para acessar o PostgreSQL privado.
 
-Fluxo atual:
+Como a função executa dentro da VPC e precisa acessar o Secrets Manager, é utilizado um **VPC Endpoint para Secrets Manager**, evitando a necessidade de NAT Gateway apenas para esse acesso.
+
+---
+
+## 📁 Estrutura do repositório
 
 ```text
-                     Internet
-                        |
-                        v
-                 AWS API Gateway
-                        |
-                 POST /auth/cliente
-                        |
-                        v
-                oficina-auth-lambda
-                  /             \
-                 /               \
-        Secrets Manager        PostgreSQL RDS
-        JWT Secret             tabela cliente
-                 \               /
-                  \             /
-                   v           v
-                      JWT
+oficina-auth-lambda/
+├── .github/
+│   └── workflows/
+│
+├── src/
+│   └── main/
+│       └── java/
+│           └── com.dinoco.oficina.auth/
+│               ├── exception/
+│               ├── handler/
+│               ├── model/
+│               ├── repository/
+│               ├── security/
+│               └── validation/
+│
+├── terraform/
+│   ├── backend.tf
+│   ├── lambda.tf
+│   ├── locals.tf
+│   ├── outputs.tf
+│   ├── providers.tf
+│   ├── remote-states.tf
+│   ├── secrets.tf
+│   ├── security-groups.tf
+│   ├── vpc-endpoints.tf
+│   └── .terraform.lock.hcl
+│
+├── pom.xml
+└── README.md
 ```
 
-A Lambda é executada dentro da mesma VPC utilizada pela infraestrutura da aplicação, permitindo acesso privado ao PostgreSQL.
+---
 
-Como uma Lambda associada à VPC não possui acesso direto à internet, foi criado um **VPC Endpoint para AWS Secrets Manager**, permitindo que a função obtenha os secrets sem utilizar NAT Gateway.
+## 🔄 Fluxo de autenticação
 
-## Fluxo de autenticação do cliente
-
-A autenticação recebe:
+A Lambda recebe:
 
 ```json
 {
@@ -86,22 +107,32 @@ A autenticação recebe:
 }
 ```
 
-A Lambda executa, resumidamente:
+Fluxo resumido:
 
-1. Normaliza o CPF.
-2. Valida os dígitos verificadores.
-3. Consulta o cliente no PostgreSQL.
-4. Garante que o registro corresponde a uma pessoa física.
-5. Verifica se o cliente está ativo.
-6. Obtém a chave JWT no AWS Secrets Manager.
-7. Gera o JWT.
-8. Retorna o token para o cliente.
+1. normaliza o CPF;
+2. valida os dígitos verificadores;
+3. consulta o cliente no PostgreSQL;
+4. confirma que o registro é de pessoa física;
+5. verifica se o cliente está ativo;
+6. obtém o segredo JWT no Secrets Manager;
+7. gera o JWT;
+8. devolve o token ao cliente.
 
-## JWT do cliente
+---
+
+## 🔐 JWT do cliente
 
 O token utiliza assinatura `HMAC256`.
 
-Exemplo de payload:
+Principais claims:
+
+- `iss`: emissor do token;
+- `sub`: ID interno do cliente;
+- `tipo`: `CLIENTE`;
+- `iat`: instante de emissão;
+- `exp`: instante de expiração.
+
+Exemplo:
 
 ```json
 {
@@ -113,92 +144,47 @@ Exemplo de payload:
 }
 ```
 
-Principais claims:
+O CPF não é armazenado no token.
 
-- `iss`: emissor do token.
-- `sub`: ID interno do cliente.
-- `tipo`: identifica o token como pertencente a um cliente.
-- `iat`: instante de emissão.
-- `exp`: instante de expiração.
+A aplicação principal utiliza o `sub` como identidade confiável do cliente para realizar autorização por recurso.
 
-O CPF não é armazenado no JWT. Após a autenticação, o cliente é identificado internamente pelo seu `id`.
+---
 
-A aplicação principal pode utilizar o `sub` para verificar se o cliente autenticado possui acesso à ordem de serviço solicitada.
-
-## Segurança
-
-Os dados sensíveis não são armazenados diretamente no código ou no Terraform.
-
-São utilizados dois secrets:
-
-- Secret JWT da aplicação.
-- Secret de credenciais do PostgreSQL gerenciado pelo RDS.
-
-A Lambda recebe apenas referências e configurações por variáveis de ambiente:
+## 🧩 Principais componentes
 
 ```text
-JWT_SECRET_ARN
-DB_SECRET_ARN
-DB_HOST
-DB_PORT
-DB_NAME
+handler/
+├── ApiGatewayAuthHandler
+└── AuthHandler
+
+validation/
+└── CpfValidator
+
+repository/
+└── ClienteRepository
+
+security/
+├── JwtService
+├── SecretProvider
+└── DatabaseSecretProvider
 ```
 
-Os valores reais de senha e chave JWT são obtidos em tempo de execução pelo AWS Secrets Manager.
+Responsabilidades:
 
-O Secret JWT é compartilhado entre:
+- `ApiGatewayAuthHandler`: adapta o evento recebido do API Gateway;
+- `AuthHandler`: coordena o fluxo de autenticação;
+- `CpfValidator`: normaliza e valida o CPF;
+- `ClienteRepository`: consulta o PostgreSQL via JDBC;
+- `DatabaseSecretProvider`: obtém credenciais do banco;
+- `SecretProvider`: obtém a chave de assinatura;
+- `JwtService`: emite o JWT do cliente.
 
-```text
-Auth Lambda
-   ↓
-assina JWT
+---
 
-Spring Boot
-   ↓
-valida JWT
-```
-
-Isso garante compatibilidade entre os tokens emitidos pela função serverless e o Spring Security da aplicação principal.
-
-> Para fins acadêmicos, o CPF é utilizado como mecanismo de autenticação conforme solicitado no requisito. Em um ambiente produtivo, seria recomendado adicionar um segundo fator, como OTP enviado por e-mail ou SMS, pois CPF isoladamente não é uma credencial secreta.
-
-## Principais componentes
-
-```text
-src/main/java/com/dinoco/oficina/auth/
-├── handler/
-│   ├── AuthHandler.java
-│   └── ApiGatewayAuthHandler.java
-├── model/
-│   ├── AuthRequest.java
-│   ├── AuthResponse.java
-│   └── Cliente.java
-├── repository/
-│   └── ClienteRepository.java
-├── security/
-│   ├── JwtService.java
-│   ├── SecretProvider.java
-│   └── DatabaseSecretProvider.java
-├── validation/
-│   └── CpfValidator.java
-└── exception/
-```
-
-Responsabilidades principais:
-
-- `ApiGatewayAuthHandler`: adapta a requisição HTTP recebida pelo API Gateway.
-- `AuthHandler`: coordena o fluxo de autenticação.
-- `CpfValidator`: normaliza e valida o CPF.
-- `ClienteRepository`: consulta o PostgreSQL via JDBC.
-- `DatabaseSecretProvider`: obtém as credenciais do banco no Secrets Manager.
-- `SecretProvider`: obtém a chave de assinatura JWT.
-- `JwtService`: gera o JWT do cliente.
-
-## Tecnologias
+## 🛠️ Tecnologias
 
 - Java 21
 - AWS Lambda
-- AWS API Gateway HTTP API
 - AWS Secrets Manager
 - AWS VPC
 - AWS PrivateLink / VPC Endpoint
@@ -210,78 +196,61 @@ Responsabilidades principais:
 - JUnit 5
 - Mockito
 
-## Infraestrutura Terraform
+> O API Gateway participa do fluxo, mas é provisionado em outro repositório.
 
-A infraestrutura específica da Lambda está em:
+---
 
-```text
-terraform/
-```
+## ☁️ Infraestrutura Terraform
 
-O Terraform é responsável por recursos como:
+A pasta `terraform/` provisiona os recursos específicos da função:
 
-- AWS Lambda.
-- Security Group da Lambda.
-- Secret utilizado para assinatura JWT.
-- VPC Endpoint para Secrets Manager.
-- Associação da Lambda às subnets da VPC.
-- Variáveis de ambiente necessárias para conexão com RDS e Secrets Manager.
+- AWS Lambda;
+- Security Group da Lambda;
+- Secret utilizado para assinatura JWT;
+- VPC Endpoint para Secrets Manager;
+- associação da Lambda às subnets da VPC;
+- variáveis de ambiente necessárias para acesso ao RDS e Secrets Manager.
 
-O state utiliza o backend S3:
+O state utiliza:
 
 ```text
 infra/auth-lambda/terraform.tfstate
 ```
 
-A infraestrutura lê outputs de outros states para reutilizar a VPC, subnets e informações do banco, sem recriar esses recursos.
+A infraestrutura lê Remote States para reutilizar recursos já existentes, principalmente:
 
-## API Gateway
+- VPC e subnets do `oficina-infra-k8s`;
+- endpoint, porta e Secret ARN do banco do `oficina-infra-db`.
 
-O API Gateway é gerenciado separadamente no repositório `oficina-infra-k8s`.
+Nenhum desses recursos externos é recriado neste repositório.
 
-Ele funciona como porta de entrada da solução e decide o destino de acordo com a rota.
+---
 
-Exemplo:
+## 🚀 Build
 
-```text
-POST /auth/cliente
-        ↓
-Auth Lambda
-
-ANY /api/*
-        ↓
-LoadBalancer
-        ↓
-Spring Boot / EKS
-```
-
-Assim, a Lambda de autenticação só é executada quando necessária.
-
-## Build
-
-Na raiz do projeto:
+Na raiz:
 
 ```bash
 mvn clean test
 mvn clean package
 ```
 
-O projeto utiliza Maven Shade Plugin para gerar um JAR com as dependências necessárias para execução na AWS Lambda.
+O Maven Shade Plugin gera o JAR com as dependências necessárias para a Lambda.
 
-Arquivo gerado:
+Exemplo:
 
 ```text
 target/oficina-auth-lambda-1.0.0.jar
 ```
 
-## Deploy com Terraform
+---
 
-Configure primeiro as credenciais do AWS LAB.
+## 🚀 Deploy
 
-Exemplo no PowerShell:
+Configure o profile do AWS se necesssário:
 
 ```powershell
-$env:AWS_PROFILE="pos"
+$env:AWS_PROFILE="profile"
 ```
 
 Depois:
@@ -296,16 +265,16 @@ terraform plan
 terraform apply
 ```
 
-## Teste pelo API Gateway
+Quando executado via pipeline, o processo de CI/CD deve realizar o build da aplicação e o provisionamento/atualização da Lambda automaticamente.
 
-Exemplo:
+---
+
+## 🧪 Teste pelo API Gateway
 
 ```http
 POST /auth/cliente
 Content-Type: application/json
 ```
-
-Body:
 
 ```json
 {
@@ -313,7 +282,7 @@ Body:
 }
 ```
 
-Para um cliente existente e ativo, a resposta esperada é:
+Resposta de sucesso:
 
 ```json
 {
@@ -321,9 +290,7 @@ Para um cliente existente e ativo, a resposta esperada é:
 }
 ```
 
-## Respostas esperadas
-
-Fluxos tratados:
+### Respostas esperadas
 
 ```text
 CPF inválido         → HTTP 400
@@ -333,46 +300,57 @@ Sucesso              → HTTP 200 + JWT
 Erro interno         → HTTP 500
 ```
 
-## Observabilidade
+---
 
-A Lambda utiliza logs para facilitar diagnóstico e monitoramento.
+## 🔒 Segurança
 
-Devem ser registrados eventos como:
+Dados sensíveis não são armazenados diretamente no código ou no Terraform.
 
-- início da autenticação;
-- CPF validado;
-- cliente localizado;
-- cliente inativo;
-- autenticação concluída;
-- JWT gerado;
-- falhas de acesso ao banco;
-- falhas de acesso ao Secrets Manager;
-- erros internos.
-
-Dados sensíveis não devem ser registrados nos logs, especialmente:
-
-- CPF completo;
-- JWT;
-- senha do banco;
-- chave de assinatura JWT.
-
-Os logs são disponibilizados no AWS CloudWatch e poderão posteriormente ser integrados ao **New Relic** para dashboards, consultas, métricas e alertas.
-
-## Integração com a aplicação principal
-
-O repositório `oficina-dinoco` continua responsável pela API Spring Boot.
-
-Funcionários:
+A Lambda utiliza referências e configurações como:
 
 ```text
-e-mail + senha
-      ↓
-Spring Boot
-      ↓
-JWT funcionário
+JWT_SECRET_ARN
+DB_SECRET_ARN
+DB_HOST
+DB_PORT
+DB_NAME
 ```
 
-Clientes:
+Os valores reais são obtidos em tempo de execução no Secrets Manager.
+
+O segredo JWT é compartilhado com a aplicação principal:
+
+```text
+Auth Lambda
+   ↓
+assina JWT
+
+Spring Boot
+   ↓
+valida JWT
+```
+
+> Para fins acadêmicos, o CPF é utilizado como mecanismo de autenticação conforme o requisito. Em um ambiente produtivo, seria recomendável adicionar um segundo fator, pois CPF isoladamente não é uma credencial secreta.
+
+---
+
+## Observabilidade
+
+A função utiliza exceptions para sinalizar falhas durante o fluxo de autenticação.
+
+Quando uma execução da AWS Lambda falha, essas informações podem ser consultadas no Amazon CloudWatch Logs, que registra os eventos e erros da execução da função.
+
+Atualmente, a Lambda não possui uma estratégia própria de logs estruturados.
+
+Dados sensíveis, como CPF completo, JWT, senha do banco e segredo de assinatura, não devem ser incluídos em mensagens de erro ou exceptions.
+
+---
+
+## 🔗 Integração com a aplicação principal
+
+O `oficina-dinoco` continua responsável pela API Spring Boot e pela autorização das rotas.
+
+Fluxo do cliente:
 
 ```text
 CPF
@@ -382,29 +360,23 @@ Auth Lambda
 JWT CLIENTE
  ↓
 API Spring Boot
+ ↓
+Autorização por clienteId
 ```
 
-As rotas utilizadas pelo cliente deverão validar:
+A aplicação valida:
 
-1. se o JWT é válido;
-2. se o token é do tipo `CLIENTE`;
-3. qual é o `clienteId` presente no `sub`;
-4. se o recurso solicitado realmente pertence ao cliente autenticado.
+1. assinatura e expiração do JWT;
+2. claim `tipo=CLIENTE`;
+3. `clienteId` presente no `sub`;
+4. propriedade do recurso solicitado.
 
-Exemplo:
+---
 
-```text
-JWT
-sub = 11
-tipo = CLIENTE
-        ↓
-GET ordem de serviço
-        ↓
-OS pertence ao cliente 11?
-     /             \
-   SIM             NÃO
-    ↓               ↓
-  permite          403
-```
+## 🔗 Repositórios relacionados
 
-Essa verificação representa a autorização do recurso e impede que um cliente acesse informações pertencentes a outro cliente.
+- `oficina-dinoco` — aplicação Spring Boot e regras de negócio.
+- `oficina-infra-k8s` — VPC, EKS, ECR, API Gateway e observabilidade Kubernetes.
+- `oficina-infra-db` — PostgreSQL RDS e infraestrutura do banco.
+
+A documentação arquitetural completa da solução é mantida no repositório principal `oficina-dinoco`.
